@@ -1,7 +1,7 @@
-# Calculate Kernel Statistics
+# kernelstats
 
-This project contains a Rust application that extracts statistics about all Linux releases from
-a git repository, and a Jupyter notebook for setting up a couple of interesting visualizations.
+This project contains a Rust application that extracts statistics about Linux releases from
+a git repository, and a Jupyter notebook for setting up interesting visualizations.
 
 ## Dependencies
 
