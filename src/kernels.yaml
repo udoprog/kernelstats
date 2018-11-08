@@ -205,8 +205,7 @@ releases:
   - version: "2.0.9"
   - version: "2.0.10"
   - version: "2.0.11"
-  # Archive Broken
-  # - version: "2.0.12"
+  - version: "2.0.12"
   - version: "2.0.13"
   - version: "2.0.14"
   - version: "2.0.15"
@@ -216,8 +215,7 @@ releases:
   - version: "2.0.19"
   - version: "2.0.20"
   - version: "2.0.21"
-  # Archive Broken
-  # - version: "2.0.22"
+  - version: "2.0.22"
   - version: "2.0.23"
   - version: "2.0.24"
   - version: "2.0.25"
@@ -226,12 +224,10 @@ releases:
   - version: "2.0.28"
   - version: "2.0.29"
   - version: "2.0.30"
-  # Archive Broken
-  # - version: "2.0.31"
+  - version: "2.0.31"
   - version: "2.0.32"
   - version: "2.0.33"
-  # Archive Broken
-  # - version: "2.0.34"
+  - version: "2.0.34"
   - version: "2.0.35"
   - version: "2.0.36"
   - version: "2.0.37"
@@ -333,7 +329,6 @@ releases:
   - version: "2.4.9"
   - version: "2.4.10"
     important: true
-  # Archive Broken
   # - version: "2.4.11-dontuse"
   - version: "2.4.12"
   - version: "2.4.13"
