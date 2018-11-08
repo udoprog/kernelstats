@@ -303,13 +303,13 @@ fn main() -> Result<(), Error> {
         })?;
     }
 
-    for (i, q) in queue.into_iter().enumerate() {
+    for q in queue {
         use flate2::write::GzEncoder;
         use flate2::Compression;
 
         info!("process: {:?}", q);
 
-        let p = stats_dir.join(format!("linux-{:03}-{}.json.gz", i, q.version()));
+        let p = stats_dir.join(format!("linux-{}.json.gz", q.version()));
 
         if p.is_file() {
             continue;

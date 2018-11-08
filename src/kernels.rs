@@ -28,11 +28,16 @@ pub struct KernelRelease {
     #[serde(default)]
     pub important: bool,
     version: String,
+    /// Custom path to download the kernel, relative to the mirror.
+    pub path: Option<String>,
 }
 
 impl KernelRelease {
-    /// Get the downloadable URL for the given kernel version.
-    pub fn tar_gz_url(&self) -> Result<String, Error> {
+    fn path(&self) -> String {
+        if let Some(path) = self.path.as_ref() {
+            return path.to_string();
+        }
+
         let version = self.version.as_str();
 
         let mut parts = version.split(".");
@@ -47,13 +52,18 @@ impl KernelRelease {
             _ => format!("linux-{version}", version = version),
         };
 
-        Ok(format!(
-            "{base}/v{major}.{minor}/{name}.tar.gz",
-            base = URL_BASE,
+        format!(
+            "v{major}.{minor}/{name}.tar.gz",
             major = major,
             minor = minor,
             name = name,
-        ))
+        )
+    }
+
+    /// Get the downloadable URL for the given kernel version.
+    pub fn tar_gz_url(&self) -> Result<String, Error> {
+        let path = self.path();
+        Ok(format!("{base}/{path}", base = URL_BASE, path = path))
     }
 }
 
