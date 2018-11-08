@@ -26,3 +26,13 @@ Start Jupyter Notebook:
 ```
 jupyter notebook
 ```
+
+## Images Generated
+
+#### Percentage distributions
+
+![Percentages](gfx/kernelstats-percentages.png)
+
+#### Millions of lines of code over time
+
+![Millions](gfx/kernelstats-millions.png)
