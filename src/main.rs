@@ -1,7 +1,10 @@
 //! Calculate code statistics for the linux kernel.
 #![deny(missing_docs)]
 
+use clap::{App, Arg};
 use kernelstats::error::Error;
+use kernelstats::git::Git;
+use log::info;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -57,14 +60,18 @@ impl ops::AddAssign for LanguageStats {
     }
 }
 
+/// The output of analyzing a single kernel.
 #[derive(Debug, Serialize)]
-struct Output<'a> {
-    tag: &'a str,
+pub struct Output {
+    /// The tag that we build for.
+    tag: String,
+    /// Statistics for all languages.
     all: HashMap<String, LanguageStats>,
 }
 
-impl<'a> Output<'a> {
-    pub fn new(tag: &'a str) -> Output {
+impl Output {
+    /// Construct a new kernel output.
+    pub fn new(tag: String) -> Output {
         Output {
             tag,
             all: Default::default(),
@@ -72,50 +79,232 @@ impl<'a> Output<'a> {
     }
 }
 
+/// A kernel to build, the path it's
+#[derive(Debug, Clone)]
+pub enum Kernel<'a> {
+    /// A kernel tar.gz that needs to be unpacked.
+    Cached {
+        /// The version of the cached kernel, in `v{major}.{minor}` format.
+        version: String,
+        /// Path to the cached kernel.
+        path: &'a Path,
+    },
+    /// A git directory tag.
+    Git {
+        /// The tag of the kernel.
+        tag: String,
+        /// The git handle for the kernel.
+        git: Git<'a>,
+    },
+}
+
+impl<'a> Kernel<'a> {
+    /// Analyze the given kernel.
+    pub fn analyze(self, work_dir: &Path) -> Result<Output, Error> {
+        match self {
+            Kernel::Cached { version, path } => {
+                use flate2::read::GzDecoder;
+                use tar::Archive;
+
+                let work_dir = work_dir.join(format!("linux-{}", version));
+
+                if !work_dir.is_dir() {
+                    let f = fs::File::open(path).map_err(|e| {
+                        format!("failed to open cached archive: {}: {}", path.display(), e)
+                    })?;
+                    let mut a = Archive::new(GzDecoder::new(f));
+
+                    a.unpack(&work_dir).map_err(|e| {
+                        format!("failed to unpack archive: {}: {}", path.display(), e)
+                    })?;
+                }
+
+                let e = fs::read_dir(&work_dir)
+                    .map_err(|e| format!("failed to read directory: {}: {}", work_dir.display(), e))
+                    .and_then(|mut e| {
+                        e.next()
+                            .ok_or_else(|| format!("no sub-directory in: {}", work_dir.display()))
+                    })?;
+
+                let output_dir = e
+                    .map_err(|e| format!("no entry: {}: {}", work_dir.display(), e))?
+                    .path();
+
+                if !output_dir.is_dir() {
+                    return Err(format!("missing linux directory: {}", output_dir.display()).into());
+                }
+
+                let mut output = Output::new(version.to_string());
+                output.all = tokei(&output_dir)?;
+
+                fs::remove_dir_all(&work_dir)
+                    .map_err(|e| format!("failed to remove dir: {}: {}", work_dir.display(), e))?;
+                Ok(output)
+            }
+            Kernel::Git { tag, git } => {
+                info!("building statistics for release: {}", tag);
+                git.checkout_hard(&tag)?;
+
+                let mut output = Output::new(tag);
+                output.all = tokei(git.repo)?;
+                Ok(output)
+            }
+        }
+    }
+}
+
+fn app() -> App<'static, 'static> {
+    App::new("kernelstats")
+        .version("0.0.1")
+        .author("John-John Tedro <udoprog@tedro.se>")
+        .about("Calculates statistics across kernel releases.")
+        .arg(
+            Arg::with_name("verify")
+                .long("verify")
+                .help("Verify that all kernels are available."),
+        ).arg(
+            Arg::with_name("all")
+                .long("all")
+                .help("Build all kernel versions, not just important."),
+        ).arg(
+            Arg::with_name("cache")
+                .long("cache")
+                .value_name("DIR")
+                .help("Sets the path to the cache directory.")
+                .takes_value(true),
+        ).arg(
+            Arg::with_name("work")
+                .long("work")
+                .value_name("DIR")
+                .help("Sets the path to the work directory.")
+                .takes_value(true),
+        ).arg(
+            Arg::with_name("kernel-git")
+                .long("kernel-git")
+                .value_name("DIR")
+                .help("Sets the path to a kernel git directory.")
+                .takes_value(true),
+        ).arg(
+            Arg::with_name("output")
+                .short("o")
+                .long("output")
+                .value_name("FILE")
+                .help("Set the output file (default: kernelstats.json.gz)")
+                .required(true)
+                .takes_value(true),
+        )
+}
+
 fn main() -> Result<(), Error> {
+    pretty_env_logger::init();
+
+    let matches = app().get_matches();
+
+    let kernel_git_dir = matches.value_of("kernel-git").map(Path::new);
+    let out_path = matches
+        .value_of("output")
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("kernelstats.json.gz"));
+    let verify = matches.is_present("verify");
+    let all = matches.is_present("all");
+
     use std::io::Write;
 
     let mut a = env::args();
     a.next();
 
-    let kernel_dir = PathBuf::from(a.next().ok_or_else(|| Error::MissingArgument)?);
-    let out_file = PathBuf::from(a.next().unwrap_or_else(|| String::from("kernelstats.json")));
+    let cache_dir = Path::new("cache");
+    let work_dir = Path::new("work");
 
-    if !kernel_dir.is_dir() {
-        return Err("missing kernel directory".into());
+    if !cache_dir.is_dir() {
+        fs::create_dir_all(cache_dir).map_err(|e| {
+            format!(
+                "failed to create cache directory: {}: {}",
+                cache_dir.display(),
+                e
+            )
+        })?;
     }
 
-    let mut out_file = fs::File::create(&out_file).map_err(|e| {
+    let mut versions = kernelstats::kernels::versions();
+
+    if !all {
+        versions = versions.into_iter().filter(|v| v.important).collect();
+    }
+
+    let mut queue = Vec::new();
+
+    info!("downloading old kernels to: {}", cache_dir.display());
+    let cached = kernelstats::kernels::download_old_kernels(cache_dir, &versions, verify)?;
+
+    for kernel in &cached {
+        queue.push(Kernel::Cached {
+            version: format!("v{}", kernel.version),
+            path: &kernel.path,
+        });
+
+        info!("downloaded: {}", kernel.path.display());
+    }
+
+    if let Some(kernel_git_dir) = kernel_git_dir {
+        if !kernel_git_dir.is_dir() {
+            return Err("missing kernel directory".into());
+        }
+
+        let git = Git::new(&kernel_git_dir);
+
+        for tag in git.tags()? {
+            match tag.as_str() {
+                // NB: not a commit
+                "v2.6.11" => continue,
+                tag if tag.ends_with("-tree") => continue,
+                // NB: skip release candidates.
+                tag if tag.trim_end_matches(char::is_numeric).ends_with("-rc") => {
+                    info!("skipping release candidate: {}", tag);
+                    continue;
+                }
+                _ => {}
+            }
+
+            queue.push(Kernel::Git { tag, git });
+        }
+    }
+
+    let out = fs::File::create(&out_path).map_err(|e| {
         format!(
             "failed to create output file: {}: {}",
-            out_file.display(),
+            out_path.display(),
             e
         )
     })?;
-    let kernel_git = kernelstats::git::Git::new(&kernel_dir);
 
-    for tag in kernel_git.tags()? {
-        match tag.as_str() {
-            // NB: not a commit
-            "v2.6.11" => continue,
-            tag if tag.ends_with("-tree") => continue,
-            // NB: skip release candidates.
-            tag if tag.trim_end_matches(char::is_numeric).ends_with("-rc") => {
-                println!("skipping release candidate: {}", tag);
-                continue;
-            }
-            _ => {}
+    if verify {
+        for q in queue {
+            info!("verified: {:?}", q);
         }
 
-        println!("building statistics for release: {}", tag);
-        kernel_git.checkout_hard(&tag)?;
+        return Ok(());
+    }
 
-        let mut output = Output::new(&tag);
-        output.all = tokei(&kernel_dir)?;
+    let mut out: Box<dyn Write> = match out_path.extension().and_then(|e| e.to_str()) {
+        Some("gz") => {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            Box::new(GzEncoder::new(out, Compression::default()))
+        }
+        _ => Box::new(out),
+    };
 
-        serde_json::to_writer(&mut out_file, &output)
+    for q in queue {
+        info!("process: {:?}", q);
+        let output = q.analyze(&work_dir)?;
+
+        serde_json::to_writer(&mut out, &output)
             .map_err(|e| format!("failed to serialize: {}", e))?;
-        writeln!(out_file, "")?;
+        writeln!(out, "")?;
+
+        out.flush()
+            .map_err(|e| format!("failed to sync: {}: {}", out_path.display(), e))?;
     }
 
     Ok(())

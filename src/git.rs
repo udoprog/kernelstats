@@ -5,8 +5,9 @@ use std::process;
 use std::str;
 
 /// Interact with a git repository.
+#[derive(Debug, Clone, Copy)]
 pub struct Git<'a> {
-    repo: &'a Path,
+    pub repo: &'a Path,
 }
 
 impl<'a> Git<'a> {
