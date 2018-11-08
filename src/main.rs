@@ -4,6 +4,7 @@
 use clap::{App, Arg};
 use kernelstats::error::Error;
 use kernelstats::git::Git;
+use kernelstats::kernels::{self, Kernels};
 use log::info;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -99,6 +100,14 @@ pub enum Kernel<'a> {
 }
 
 impl<'a> Kernel<'a> {
+    /// Get the version of the kernel.
+    pub fn version(&self) -> &str {
+        match *self {
+            Kernel::Cached { ref version, .. } => version.as_str(),
+            Kernel::Git { ref tag, .. } => tag.as_str(),
+        }
+    }
+
     /// Analyze the given kernel.
     pub fn analyze(self, work_dir: &Path) -> Result<Output, Error> {
         match self {
@@ -179,18 +188,16 @@ fn app() -> App<'static, 'static> {
                 .help("Sets the path to the work directory.")
                 .takes_value(true),
         ).arg(
+            Arg::with_name("stats")
+                .long("stats")
+                .value_name("DIR")
+                .help("Directory to store statistics in.")
+                .takes_value(true),
+        ).arg(
             Arg::with_name("kernel-git")
                 .long("kernel-git")
                 .value_name("DIR")
                 .help("Sets the path to a kernel git directory.")
-                .takes_value(true),
-        ).arg(
-            Arg::with_name("output")
-                .short("o")
-                .long("output")
-                .value_name("FILE")
-                .help("Set the output file (default: kernelstats.json.gz)")
-                .required(true)
                 .takes_value(true),
         )
 }
@@ -201,20 +208,28 @@ fn main() -> Result<(), Error> {
     let matches = app().get_matches();
 
     let kernel_git_dir = matches.value_of("kernel-git").map(Path::new);
-    let out_path = matches
-        .value_of("output")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("kernelstats.json.gz"));
     let verify = matches.is_present("verify");
     let all = matches.is_present("all");
+
+    let cache_dir = matches
+        .value_of("cache")
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("cache"));
+
+    let work_dir = matches
+        .value_of("work")
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("work"));
+
+    let stats_dir = matches
+        .value_of("stats")
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new("stats"));
 
     use std::io::Write;
 
     let mut a = env::args();
     a.next();
-
-    let cache_dir = Path::new("cache");
-    let work_dir = Path::new("work");
 
     if !cache_dir.is_dir() {
         fs::create_dir_all(cache_dir).map_err(|e| {
@@ -226,16 +241,16 @@ fn main() -> Result<(), Error> {
         })?;
     }
 
-    let mut versions = kernelstats::kernels::versions();
+    let Kernels { mut releases } = kernels::kernels()?;
 
     if !all {
-        versions = versions.into_iter().filter(|v| v.important).collect();
+        releases = releases.into_iter().filter(|v| v.important).collect();
     }
 
     let mut queue = Vec::new();
 
     info!("downloading old kernels to: {}", cache_dir.display());
-    let cached = kernelstats::kernels::download_old_kernels(cache_dir, &versions, verify)?;
+    let cached = kernels::download_old_kernels(cache_dir, &releases, verify)?;
 
     for kernel in &cached {
         queue.push(Kernel::Cached {
@@ -270,14 +285,6 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    let out = fs::File::create(&out_path).map_err(|e| {
-        format!(
-            "failed to create output file: {}: {}",
-            out_path.display(),
-            e
-        )
-    })?;
-
     if verify {
         for q in queue {
             info!("verified: {:?}", q);
@@ -286,25 +293,41 @@ fn main() -> Result<(), Error> {
         return Ok(());
     }
 
-    let mut out: Box<dyn Write> = match out_path.extension().and_then(|e| e.to_str()) {
-        Some("gz") => {
-            use flate2::write::GzEncoder;
-            use flate2::Compression;
-            Box::new(GzEncoder::new(out, Compression::default()))
-        }
-        _ => Box::new(out),
-    };
+    if !stats_dir.is_dir() {
+        fs::create_dir_all(stats_dir).map_err(|e| {
+            format!(
+                "failed to create stats directory: {}: {}",
+                stats_dir.display(),
+                e
+            )
+        })?;
+    }
 
-    for q in queue {
+    for (i, q) in queue.into_iter().enumerate() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
         info!("process: {:?}", q);
+
+        let p = stats_dir.join(format!("linux-{:03}-{}.json.gz", i, q.version()));
+
+        if p.is_file() {
+            continue;
+        }
+
         let output = q.analyze(&work_dir)?;
 
-        serde_json::to_writer(&mut out, &output)
-            .map_err(|e| format!("failed to serialize: {}", e))?;
-        writeln!(out, "")?;
+        let o = fs::File::create(&p)
+            .map_err(|e| format!("failed to create output file: {}: {}", p.display(), e))?;
 
-        out.flush()
-            .map_err(|e| format!("failed to sync: {}: {}", out_path.display(), e))?;
+        let mut o = GzEncoder::new(o, Compression::default());
+
+        serde_json::to_writer(&mut o, &output)
+            .map_err(|e| format!("failed to serialize: {}", e))?;
+        writeln!(o, "")?;
+
+        o.flush()
+            .map_err(|e| format!("failed to sync: {}: {}", p.display(), e))?;
     }
 
     Ok(())

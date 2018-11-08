@@ -50,7 +50,7 @@ impl<'a> Git<'a> {
     /// Get all git tags, sorted by commiter date.
     pub fn tags(&self) -> Result<Vec<String>, Error> {
         let out = self.git(&["tag", "--sort=taggerdate"])?;
-        Ok(out.split("\n").map(|s| s.to_string()).collect())
+        Ok(out.split("\n").filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
     }
 
     pub fn checkout_hard(&self, reference: &str) -> Result<(), Error> {
