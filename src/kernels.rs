@@ -24,12 +24,15 @@ pub struct Kernels {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct KernelRelease {
-    /// If this version is important.
+    /// The version of this release.
+    pub version: String,
+    /// If this release is important.
     #[serde(default)]
     pub important: bool,
-    version: String,
     /// Custom path to download the kernel, relative to the mirror.
     pub path: Option<String>,
+    /// What encoding to expect for files in the project.
+    pub encoding: Option<String>,
 }
 
 impl KernelRelease {
@@ -75,7 +78,7 @@ impl fmt::Display for KernelRelease {
 
 #[derive(Debug, Clone)]
 pub struct CachedKernel<'a> {
-    pub version: &'a KernelRelease,
+    pub release: &'a KernelRelease,
     pub path: PathBuf,
 }
 
@@ -98,12 +101,12 @@ pub fn download_old_kernels<'a>(
     let index_atomic = AtomicUsize::new(0);
 
     let results = pool.install(|| {
-        let results = versions.par_iter().map(|version| {
+        let results = versions.par_iter().map(|release| {
             download_archive(
                 index_atomic.fetch_add(1, Ordering::SeqCst),
                 total,
                 root,
-                version,
+                release,
                 verify,
             )
         });
@@ -118,10 +121,10 @@ pub fn download_old_kernels<'a>(
         index: usize,
         total: usize,
         root: &Path,
-        version: &'a KernelRelease,
+        release: &'a KernelRelease,
         verify: bool,
     ) -> Result<CachedKernel<'a>, Error> {
-        let path = root.join(format!("linux-{}.tar.gz", version));
+        let path = root.join(format!("linux-{}.tar.gz", release));
 
         // use existing path if it already exists.
         if path.is_file() {
@@ -141,11 +144,11 @@ pub fn download_old_kernels<'a>(
 
             if ok {
                 info!("{}/{}: OK: {}", index, total, path.display());
-                return Ok(CachedKernel { version, path });
+                return Ok(CachedKernel { release, path });
             }
         }
 
-        let url = version.tar_gz_url()?;
+        let url = release.tar_gz_url()?;
 
         info!(
             "{}/{}: downloading {} -> {}",
@@ -183,7 +186,7 @@ pub fn download_old_kernels<'a>(
         out.sync_all()
             .map_err(|e| format!("failed to sync: {}: {}", path.display(), e))?;
 
-        Ok(CachedKernel { version, path })
+        Ok(CachedKernel { release, path })
     }
 
     /// Test that the given path is a proper archive.

@@ -13,7 +13,11 @@ serde_derive = "1"
 rayon = "1"
 reqwest = "0.9"
 flate2 = "1"
-tar = "0.4"
+tar = {version = "0.4"}
 clap = "2.32"
 log = "0.4"
 pretty_env_logger = "0.2"
+tokei = {path = "../tokei", version = "8", features = ["io"]}
+encoding_rs_io = "0.1"
+encoding_rs = "0.8"
+ignore = "0.4"
