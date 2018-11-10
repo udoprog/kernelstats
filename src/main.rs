@@ -4,33 +4,177 @@
 use clap::{App, Arg};
 use kernelstats::error::Error;
 use kernelstats::git::Git;
-use kernelstats::kernels::{self, Kernels};
-use log::info;
+use kernelstats::kernels::{self, KernelRelease, Kernels};
+use log::{info, warn};
+use rayon::iter::IntoParallelIterator;
 use serde_derive::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::ops;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::str;
+use tokei::{FileAccess, Language, LanguageType};
 
-/// Call tokei on the given path and get statistics.
-fn tokei(dir: &Path) -> Result<HashMap<String, LanguageStats>, Error> {
-    let out = process::Command::new("tokei")
-        .current_dir(dir)
-        .args(&["-o", "json"])
-        .output()
-        .map_err(|e| format!("failed to call tokei: {}", e))?;
+fn tokei_process<'a>(
+    files: impl IntoParallelIterator<Item = impl Send + FileAccess<'a>>,
+) -> Result<BTreeMap<LanguageType, Language>, Error> {
+    use rayon::prelude::*;
 
-    if !out.status.success() {
-        let out = str::from_utf8(&out.stderr).map_err(|_| "tokei stderr is not valid UTF-8")?;
-        return Err(format!("git error: {}", out).into());
+    let iter = files.into_par_iter().map(|file_access| {
+        if let Some(ty) = LanguageType::from_file_access(file_access) {
+            let s = match ty.parse(file_access) {
+                Ok(s) => s,
+                Err(e) => return Err((e, file_access)),
+            };
+
+            return Ok(Some((ty, s)));
+        }
+
+        Ok(None)
+    });
+
+    let mut out = BTreeMap::new();
+
+    for res in iter.collect::<Vec<_>>() {
+        match res {
+            Ok(Some((ty, s))) => {
+                out.entry(ty).or_insert_with(Language::new).add_stat(s);
+            }
+            Ok(None) => {
+                // NB: could not detect language..
+            }
+            Err((e, file_access)) => {
+                warn!("error processing file: {}: {}", file_access.name(), e);
+            }
+        }
     }
 
-    let stdout = str::from_utf8(&out.stdout).map_err(|_| "tokei stdout is not valid UTF-8")?;
-    Ok(serde_json::from_str(&stdout)
-        .map_err(|e| format!("failed to deserialize tokei output: {}", e))?)
+    Ok(out)
+}
+
+fn tokei_tar_gz(
+    tar: &Path,
+    encoding: Option<&str>,
+) -> Result<BTreeMap<LanguageType, Language>, Error> {
+    use encoding_rs_io::DecodeReaderBytesBuilder;
+    use flate2::read::GzDecoder;
+    use std::borrow::Cow;
+    use std::io::{self, Read};
+    use tar::Archive;
+
+    let file = fs::File::open(tar).map_err(|e| format!("failed to open file: {}", e))?;
+    let mut ar = Archive::new(GzDecoder::new(file));
+
+    let entries = ar
+        .entries()
+        .map_err(|e| format!("failed to get entries: {}", e))?;
+
+    let mut files = Vec::new();
+
+    let mut content = String::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("bad entry: {}", e))?;
+
+        // NB: need to skip first part of the component due to code existing in a nested directory.
+        let path = {
+            let path = entry
+                .header()
+                .path()
+                .map_err(|e| format!("failed to get path for entry: {}", e))?;
+
+            let mut components = path.components();
+
+            components.next();
+            components.as_path().to_owned()
+        };
+
+        let encoding = encoding
+            .map(|s| s.as_bytes())
+            .and_then(encoding_rs::Encoding::for_label)
+            .unwrap_or(encoding_rs::UTF_8);
+
+        let mut decoder = DecodeReaderBytesBuilder::new();
+        decoder.encoding(Some(encoding));
+        let mut entry = decoder.build(entry);
+
+        if let Err(e) = entry.read_to_string(&mut content) {
+            warn!("could not read entry: {}: {}", path.display(), e);
+            // return Err(format!("could not read entry: {}: {}", path.display(), e).into());
+        }
+
+        files.push(TarEntry(path, content.clone()));
+        content.clear();
+    }
+
+    let files = files.iter().collect::<Vec<_>>();
+    return tokei_process(files);
+
+    struct TarEntry(PathBuf, String);
+
+    impl<'a> FileAccess<'a> for &'a TarEntry {
+        fn read_to_string(self) -> io::Result<String> {
+            Ok(self.1.to_string())
+        }
+
+        fn read_first_line(self) -> io::Result<String> {
+            let line = self
+                .1
+                .split("\n")
+                .next()
+                .map(|l| l.to_string())
+                .unwrap_or_else(|| self.1.to_string());
+            Ok(line)
+        }
+
+        fn name(self) -> Cow<'a, str> {
+            self.0.to_string_lossy()
+        }
+
+        fn file_name(self) -> Option<Cow<'a, str>> {
+            match self.0.file_name() {
+                Some(filename_os) => Some(Cow::from(filename_os.to_string_lossy().to_lowercase())),
+                None => None,
+            }
+        }
+
+        fn extension(self) -> Option<Cow<'a, str>> {
+            match self.0.extension() {
+                Some(extension_os) => {
+                    Some(Cow::from(extension_os.to_string_lossy().to_lowercase()))
+                }
+                None => None,
+            }
+        }
+    }
+}
+
+/// Call tokei on the given path and get statistics.
+fn tokei(dir: &Path) -> Result<BTreeMap<LanguageType, Language>, Error> {
+    use ignore::Walk;
+
+    let mut files = Vec::new();
+
+    for result in Walk::new(dir) {
+        let result = result.map_err(|e| format!("failed to get file entry: {}", e))?;
+        let p = result.path();
+
+        let name = p
+            .strip_prefix(dir)
+            .map_err(|e| format!("failed to strip prefix: {}", e))?
+            .to_string_lossy()
+            .to_string();
+
+        files.push((format!("./{}", name), p.to_owned()));
+    }
+
+    let files = files
+        .iter()
+        .map(|(name, f)| f.as_path().with_name(&name))
+        .collect::<Vec<_>>();
+
+    return tokei_process(files);
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -67,7 +211,7 @@ pub struct Output {
     /// The tag that we build for.
     tag: String,
     /// Statistics for all languages.
-    all: HashMap<String, LanguageStats>,
+    all: BTreeMap<LanguageType, Language>,
 }
 
 impl Output {
@@ -84,11 +228,13 @@ impl Output {
 #[derive(Debug, Clone)]
 pub enum Kernel<'a> {
     /// A kernel tar.gz that needs to be unpacked.
-    Cached {
-        /// The version of the cached kernel, in `v{major}.{minor}` format.
+    Archive {
+        /// The version of the archive kernel, in `v{major}.{minor}` format.
         version: String,
-        /// Path to the cached kernel.
+        /// Path to the archive kernel.
         path: &'a Path,
+        /// The release this kernel belongs to.
+        release: &'a KernelRelease,
     },
     /// A git directory tag.
     Git {
@@ -103,51 +249,22 @@ impl<'a> Kernel<'a> {
     /// Get the version of the kernel.
     pub fn version(&self) -> &str {
         match *self {
-            Kernel::Cached { ref version, .. } => version.as_str(),
+            Kernel::Archive { ref version, .. } => version.as_str(),
             Kernel::Git { ref tag, .. } => tag.as_str(),
         }
     }
 
     /// Analyze the given kernel.
-    pub fn analyze(self, work_dir: &Path) -> Result<Output, Error> {
+    pub fn analyze(self) -> Result<Output, Error> {
         match self {
-            Kernel::Cached { version, path } => {
-                use flate2::read::GzDecoder;
-                use tar::Archive;
-
-                let work_dir = work_dir.join(format!("linux-{}", version));
-
-                if !work_dir.is_dir() {
-                    let f = fs::File::open(path).map_err(|e| {
-                        format!("failed to open cached archive: {}: {}", path.display(), e)
-                    })?;
-                    let mut a = Archive::new(GzDecoder::new(f));
-
-                    a.unpack(&work_dir).map_err(|e| {
-                        format!("failed to unpack archive: {}: {}", path.display(), e)
-                    })?;
-                }
-
-                let e = fs::read_dir(&work_dir)
-                    .map_err(|e| format!("failed to read directory: {}: {}", work_dir.display(), e))
-                    .and_then(|mut e| {
-                        e.next()
-                            .ok_or_else(|| format!("no sub-directory in: {}", work_dir.display()))
-                    })?;
-
-                let output_dir = e
-                    .map_err(|e| format!("no entry: {}: {}", work_dir.display(), e))?
-                    .path();
-
-                if !output_dir.is_dir() {
-                    return Err(format!("missing linux directory: {}", output_dir.display()).into());
-                }
-
+            Kernel::Archive {
+                version,
+                path,
+                release,
+            } => {
+                let encoding = release.encoding.as_ref().map(|e| e.as_str());
                 let mut output = Output::new(version.to_string());
-                output.all = tokei(&output_dir)?;
-
-                fs::remove_dir_all(&work_dir)
-                    .map_err(|e| format!("failed to remove dir: {}: {}", work_dir.display(), e))?;
+                output.all = tokei_tar_gz(path, encoding)?;
                 Ok(output)
             }
             Kernel::Git { tag, git } => {
@@ -216,11 +333,6 @@ fn main() -> Result<(), Error> {
         .map(Path::new)
         .unwrap_or_else(|| Path::new("cache"));
 
-    let work_dir = matches
-        .value_of("work")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("work"));
-
     let stats_dir = matches
         .value_of("stats")
         .map(Path::new)
@@ -253,8 +365,9 @@ fn main() -> Result<(), Error> {
     let cached = kernels::download_old_kernels(cache_dir, &releases, verify)?;
 
     for kernel in &cached {
-        queue.push(Kernel::Cached {
-            version: format!("v{}", kernel.version),
+        queue.push(Kernel::Archive {
+            release: kernel.release,
+            version: format!("v{}", kernel.release.version),
             path: &kernel.path,
         });
 
@@ -315,7 +428,7 @@ fn main() -> Result<(), Error> {
             continue;
         }
 
-        let output = q.analyze(&work_dir)?;
+        let output = q.analyze()?;
 
         let o = fs::File::create(&p)
             .map_err(|e| format!("failed to create output file: {}: {}", p.display(), e))?;
