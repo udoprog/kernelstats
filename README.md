@@ -35,10 +35,12 @@ jupyter notebook
 
 ## Images Generated
 
+**Note:** Click for bigger images.
+
 #### Percentage distributions
 
-![Percentages](gfx/kernelstats-percentages.png)
+[![Percentages](gfx/kernelstats-percentages.png)](https://raw.githubusercontent.com/udoprog/kernelstats/master/gfx/kernelstats-percentages.png)
 
 #### Millions of lines of code over time
 
-![Millions](gfx/kernelstats-millions.png)
+[![Millions](gfx/kernelstats-millions.png)](https://raw.githubusercontent.com/udoprog/kernelstats/master/gfx/kernelstats-millions.png)
