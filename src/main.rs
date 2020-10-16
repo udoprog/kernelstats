@@ -1,8 +1,8 @@
 //! Calculate code statistics for the linux kernel.
 #![deny(missing_docs)]
 
+use anyhow::{anyhow, Context as _, Result};
 use clap::{App, Arg};
-use kernelstats::error::Error;
 use kernelstats::git::Git;
 use kernelstats::kernels::{self, Kernels};
 use log::info;
@@ -16,21 +16,19 @@ use std::process;
 use std::str;
 
 /// Call tokei on the given path and get statistics.
-fn tokei(dir: &Path) -> Result<HashMap<String, LanguageStats>, Error> {
+fn tokei(dir: &Path) -> Result<HashMap<String, LanguageStats>> {
     let out = process::Command::new("tokei")
         .current_dir(dir)
         .args(&["-o", "json"])
-        .output()
-        .map_err(|e| format!("failed to call tokei: {}", e))?;
+        .output()?;
 
     if !out.status.success() {
-        let out = str::from_utf8(&out.stderr).map_err(|_| "tokei stderr is not valid UTF-8")?;
-        return Err(format!("git error: {}", out).into());
+        let out = str::from_utf8(&out.stderr)?;
+        return Err(anyhow!("git error: {}", out).into());
     }
 
-    let stdout = str::from_utf8(&out.stdout).map_err(|_| "tokei stdout is not valid UTF-8")?;
-    Ok(serde_json::from_str(&stdout)
-        .map_err(|e| format!("failed to deserialize tokei output: {}", e))?)
+    let stdout = str::from_utf8(&out.stdout)?;
+    Ok(serde_json::from_str(&stdout)?)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -109,7 +107,7 @@ impl<'a> Kernel<'a> {
     }
 
     /// Analyze the given kernel.
-    pub fn analyze(self, work_dir: &Path) -> Result<Output, Error> {
+    pub fn analyze(self, work_dir: &Path) -> Result<Output> {
         match self {
             Kernel::Cached { version, path } => {
                 use flate2::read::GzDecoder;
@@ -119,35 +117,32 @@ impl<'a> Kernel<'a> {
 
                 if !work_dir.is_dir() {
                     let f = fs::File::open(path).map_err(|e| {
-                        format!("failed to open cached archive: {}: {}", path.display(), e)
+                        anyhow!("failed to open cached archive: {}: {}", path.display(), e)
                     })?;
                     let mut a = Archive::new(GzDecoder::new(f));
 
-                    a.unpack(&work_dir).map_err(|e| {
-                        format!("failed to unpack archive: {}: {}", path.display(), e)
-                    })?;
+                    a.unpack(&work_dir)
+                        .with_context(|| anyhow!("failed to unpack archive: {}", path.display()))?;
                 }
 
                 let e = fs::read_dir(&work_dir)
-                    .map_err(|e| format!("failed to read directory: {}: {}", work_dir.display(), e))
-                    .and_then(|mut e| {
-                        e.next()
-                            .ok_or_else(|| format!("no sub-directory in: {}", work_dir.display()))
-                    })?;
+                    .with_context(|| anyhow!("failed to read directory: {}", work_dir.display()))?
+                    .next()
+                    .ok_or_else(|| anyhow!("no sub-directory in: {}", work_dir.display()))?;
 
                 let output_dir = e
-                    .map_err(|e| format!("no entry: {}: {}", work_dir.display(), e))?
+                    .with_context(|| anyhow!("no entry: {}", work_dir.display()))?
                     .path();
 
                 if !output_dir.is_dir() {
-                    return Err(format!("missing linux directory: {}", output_dir.display()).into());
+                    return Err(anyhow!("missing linux directory: {}", output_dir.display()).into());
                 }
 
                 let mut output = Output::new(version.to_string());
-                output.all = tokei(&output_dir)?;
+                output.all = tokei(&output_dir).context("running tokei")?;
 
                 fs::remove_dir_all(&work_dir)
-                    .map_err(|e| format!("failed to remove dir: {}: {}", work_dir.display(), e))?;
+                    .map_err(|e| anyhow!("failed to remove dir: {}: {}", work_dir.display(), e))?;
                 Ok(output)
             }
             Kernel::Git { tag, git } => {
@@ -155,7 +150,7 @@ impl<'a> Kernel<'a> {
                 git.checkout_hard(&tag)?;
 
                 let mut output = Output::new(tag);
-                output.all = tokei(git.repo)?;
+                output.all = tokei(git.repo).context("running tokei")?;
                 Ok(output)
             }
         }
@@ -171,29 +166,42 @@ fn app() -> App<'static, 'static> {
             Arg::with_name("verify")
                 .long("verify")
                 .help("Verify that all kernels are available."),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("all")
                 .long("all")
                 .help("Build all kernel versions, not just important."),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("cache")
                 .long("cache")
                 .value_name("DIR")
                 .help("Sets the path to the cache directory.")
                 .takes_value(true),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("work")
                 .long("work")
                 .value_name("DIR")
                 .help("Sets the path to the work directory.")
                 .takes_value(true),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("stats")
                 .long("stats")
                 .value_name("DIR")
                 .help("Directory to store statistics in.")
                 .takes_value(true),
-        ).arg(
+        )
+        .arg(
+            Arg::with_name("parallelism")
+                .long("parallelism")
+                .short("p")
+                .value_name("<count>")
+                .help("How many downloads to perform in parallel.")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("kernel-git")
                 .long("kernel-git")
                 .value_name("DIR")
@@ -202,7 +210,8 @@ fn app() -> App<'static, 'static> {
         )
 }
 
-fn main() -> Result<(), Error> {
+#[tokio::main]
+async fn main() -> Result<()> {
     pretty_env_logger::init();
 
     let matches = app().get_matches();
@@ -226,6 +235,11 @@ fn main() -> Result<(), Error> {
         .map(Path::new)
         .unwrap_or_else(|| Path::new("stats"));
 
+    let parallelism = match matches.value_of("parallelism") {
+        Some(p) => str::parse(p).map_err(|e| anyhow!("failed to parse parallelism: {}", e))?,
+        None => 2,
+    };
+
     use std::io::Write;
 
     let mut a = env::args();
@@ -233,7 +247,7 @@ fn main() -> Result<(), Error> {
 
     if !cache_dir.is_dir() {
         fs::create_dir_all(cache_dir).map_err(|e| {
-            format!(
+            anyhow!(
                 "failed to create cache directory: {}: {}",
                 cache_dir.display(),
                 e
@@ -250,7 +264,7 @@ fn main() -> Result<(), Error> {
     let mut queue = Vec::new();
 
     info!("downloading old kernels to: {}", cache_dir.display());
-    let cached = kernels::download_old_kernels(cache_dir, &releases, verify)?;
+    let cached = kernels::download_old_kernels(cache_dir, &releases, verify, parallelism).await?;
 
     for kernel in &cached {
         queue.push(Kernel::Cached {
@@ -263,7 +277,7 @@ fn main() -> Result<(), Error> {
 
     if let Some(kernel_git_dir) = kernel_git_dir {
         if !kernel_git_dir.is_dir() {
-            return Err("missing kernel directory".into());
+            return Err(anyhow!("missing kernel directory"));
         }
 
         let git = Git::new(&kernel_git_dir);
@@ -295,7 +309,7 @@ fn main() -> Result<(), Error> {
 
     if !stats_dir.is_dir() {
         fs::create_dir_all(stats_dir).map_err(|e| {
-            format!(
+            anyhow!(
                 "failed to create stats directory: {}: {}",
                 stats_dir.display(),
                 e
@@ -318,16 +332,16 @@ fn main() -> Result<(), Error> {
         let output = q.analyze(&work_dir)?;
 
         let o = fs::File::create(&p)
-            .map_err(|e| format!("failed to create output file: {}: {}", p.display(), e))?;
+            .map_err(|e| anyhow!("failed to create output file: {}: {}", p.display(), e))?;
 
         let mut o = GzEncoder::new(o, Compression::default());
 
         serde_json::to_writer(&mut o, &output)
-            .map_err(|e| format!("failed to serialize: {}", e))?;
+            .map_err(|e| anyhow!("failed to serialize: {}", e))?;
         writeln!(o, "")?;
 
         o.flush()
-            .map_err(|e| format!("failed to sync: {}: {}", p.display(), e))?;
+            .with_context(|| anyhow!("failed to sync: {}", p.display()))?;
     }
 
     Ok(())

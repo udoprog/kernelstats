@@ -1,6 +1,6 @@
 //! list of old kernel versions.
 
-use crate::error::Error;
+use anyhow::{anyhow, Result};
 use log::{info, warn};
 use serde_derive::Deserialize;
 use std::fmt;
@@ -12,9 +12,8 @@ pub const URL_BASE: &'static str = "https://mirrors.kernel.org/pub/linux/kernel"
 const KERNELS: &'static str = include_str!("kernels.yaml");
 
 /// Get all kernel versions.
-pub fn kernels() -> Result<Kernels, Error> {
-    serde_yaml::from_str(KERNELS)
-        .map_err(|e| Error::from(format!("failed to deserialize kernels: {}", e)))
+pub fn kernels() -> Result<Kernels> {
+    serde_yaml::from_str(KERNELS).map_err(|e| anyhow!("failed to deserialize kernels: {}", e))
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -61,7 +60,7 @@ impl KernelRelease {
     }
 
     /// Get the downloadable URL for the given kernel version.
-    pub fn tar_gz_url(&self) -> Result<String, Error> {
+    pub fn tar_gz_url(&self) -> Result<String> {
         let path = self.path();
         Ok(format!("{base}/{path}", base = URL_BASE, path = path))
     }
@@ -80,58 +79,57 @@ pub struct CachedKernel<'a> {
 }
 
 /// Download the archives of the listed versions in parallel.
-pub fn download_old_kernels<'a>(
+pub async fn download_old_kernels<'a>(
     root: &Path,
     versions: &'a [KernelRelease],
     verify: bool,
-) -> Result<Vec<CachedKernel<'a>>, Error> {
-    use rayon::prelude::*;
-    use rayon::ThreadPoolBuilder;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(8)
-        .build()
-        .map_err(|e| format!("failed to build thread pool: {}", e))?;
-
+    parallelism: usize,
+) -> Result<Vec<CachedKernel<'a>>> {
     let total = versions.len();
-    let index_atomic = AtomicUsize::new(0);
+    let mut results = Vec::new();
 
-    let results = pool.install(|| {
-        let results = versions.par_iter().map(|version| {
-            download_archive(
-                index_atomic.fetch_add(1, Ordering::SeqCst),
-                total,
-                root,
-                version,
-                verify,
-            )
-        });
+    let mut it = versions.iter().enumerate();
+    let mut tasks = unicycle::FuturesUnordered::new();
+    let mut count = 0;
 
-        results.collect::<Result<Vec<CachedKernel>, Error>>()
-    });
+    loop {
+        if count < parallelism {
+            if let Some((index, version)) = it.next() {
+                count += 1;
+                tasks.push(download_archive(index, total, root, version, verify));
+                continue;
+            }
+        }
 
-    return Ok(results?);
+        if tasks.is_empty() {
+            break;
+        }
+
+        results.push(tasks.next().await.unwrap()?);
+        count -= 1;
+    }
+
+    return Ok(results);
 
     /// Download the specified archive.
-    fn download_archive<'a>(
+    async fn download_archive<'a>(
         index: usize,
         total: usize,
         root: &Path,
         version: &'a KernelRelease,
         verify: bool,
-    ) -> Result<CachedKernel<'a>, Error> {
+    ) -> Result<CachedKernel<'a>> {
         let path = root.join(format!("linux-{}.tar.gz", version));
 
         // use existing path if it already exists.
         if path.is_file() {
             let ok = if verify {
                 match test_archive(&path) {
-                    None => true,
-                    Some(e) => {
+                    Ok(()) => true,
+                    Err(e) => {
                         warn!("ignoring bad archive: {}: {}", path.display(), e);
                         fs::remove_file(&path)
-                            .map_err(|e| format!("failed to remove: {}: {}", path.display(), e))?;
+                            .map_err(|e| anyhow!("failed to remove: {}: {}", path.display(), e))?;
                         false
                     }
                 }
@@ -155,33 +153,31 @@ pub fn download_old_kernels<'a>(
             path.display()
         );
 
-        let mut res =
-            reqwest::get(&url).map_err(|e| format!("failed to get url: {}: {}", url, e))?;
+        let res = reqwest::get(&url)
+            .await
+            .map_err(|e| anyhow!("failed to get url: {}: {}", url, e))?;
 
         if !res.status().is_success() {
-            return Err(format!("failed to download: {}: {}", url, res.status()).into());
+            return Err(anyhow!("failed to download: {}: {}", url, res.status()).into());
         }
 
-        let mut buf = Vec::new();
+        let buf = res.bytes().await?;
 
-        res.copy_to(&mut buf)
-            .map_err(|e| format!("failed to copy tarball to memory: {}", e))?;
-
-        if let Some(e) = test_reader_archive(Cursor::new(&buf)) {
-            return Err(format!(
+        if let Err(e) = test_reader_archive(Cursor::new(&buf)) {
+            return Err(anyhow!(
                 "test on downloaded archive failed: {}: {}",
                 path.display(),
                 e
-            ).into());
+            ));
         }
 
         let mut out = fs::File::create(&path)
-            .map_err(|e| format!("failed to open file: {}: {}", path.display(), e))?;
+            .map_err(|e| anyhow!("failed to open file: {}: {}", path.display(), e))?;
 
         out.write_all(&buf)
-            .map_err(|e| format!("failed to write file: {}: {}", path.display(), e))?;
+            .map_err(|e| anyhow!("failed to write file: {}: {}", path.display(), e))?;
         out.sync_all()
-            .map_err(|e| format!("failed to sync: {}: {}", path.display(), e))?;
+            .map_err(|e| anyhow!("failed to sync: {}: {}", path.display(), e))?;
 
         Ok(CachedKernel { version, path })
     }
@@ -190,9 +186,9 @@ pub fn download_old_kernels<'a>(
     ///
     /// Returns a reason string describing what's wrong with the archive if it's not OK.
     /// Otherwise, returns `None`.
-    fn test_archive(path: &Path) -> Option<String> {
+    fn test_archive(path: &Path) -> Result<()> {
         let f = match fs::File::open(path) {
-            Err(e) => return Some(format!("failed to open archive: {}", e)),
+            Err(e) => return Err(anyhow!("failed to open archive: {}", e)),
             Ok(f) => f,
         };
 
@@ -200,28 +196,28 @@ pub fn download_old_kernels<'a>(
     }
 
     /// Test that the reader archive is OK.
-    fn test_reader_archive(reader: impl Read) -> Option<String> {
+    fn test_reader_archive(reader: impl Read) -> Result<()> {
         use flate2::read::GzDecoder;
         use tar::Archive;
 
         let mut a = Archive::new(GzDecoder::new(reader));
 
         let entries = match a.entries() {
-            Err(e) => return Some(format!("failed to list tar entries: {}", e)),
+            Err(e) => return Err(anyhow!("failed to list tar entries: {}", e)),
             Ok(entries) => entries,
         };
 
         for entry in entries {
             let entry = match entry {
-                Err(e) => return Some(format!("bad entry: {}", e)),
+                Err(e) => return Err(anyhow!("bad entry: {}", e)),
                 Ok(entry) => entry,
             };
 
             if let Err(e) = entry.path() {
-                return Some(format!("bad entry: {}", e));
+                return Err(anyhow!("bad entry: {}", e));
             }
         }
 
-        None
+        Ok(())
     }
 }
