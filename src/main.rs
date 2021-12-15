@@ -32,12 +32,16 @@ fn tokei(dir: &Path) -> Result<HashMap<String, LanguageStats>> {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Stat {
+struct Stats {
     blanks: u64,
     code: u64,
     comments: u64,
-    lines: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Report {
     name: PathBuf,
+    stats: Stats,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -45,8 +49,7 @@ struct LanguageStats {
     blanks: u64,
     code: u64,
     comments: u64,
-    lines: u64,
-    stats: Vec<Stat>,
+    reports: Vec<Report>,
 }
 
 impl ops::AddAssign for LanguageStats {
@@ -54,8 +57,7 @@ impl ops::AddAssign for LanguageStats {
         self.blanks += other.blanks;
         self.code += other.code;
         self.comments += other.comments;
-        self.lines += other.lines;
-        self.stats.extend(other.stats);
+        self.reports.extend(other.reports);
     }
 }
 
@@ -286,7 +288,7 @@ async fn main() -> Result<()> {
             match tag.as_str() {
                 // NB: not a commit
                 "v2.6.11" => continue,
-                tag if tag.ends_with("-tree") => continue,
+                tag if tag.ends_with("-tree") || tag.ends_with("-dontuse") => continue,
                 // NB: skip release candidates.
                 tag if tag.trim_end_matches(char::is_numeric).ends_with("-rc") => {
                     info!("skipping release candidate: {}", tag);
