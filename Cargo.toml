@@ -6,7 +6,7 @@ license = "MIT/Apache-2.0"
 edition = "2018"
 
 [dependencies]
-tokio = {version = "0.2", features = ["full"]}
+tokio = {version = "1.13", features = ["full"]}
 serde = "1"
 serde_json = "1"
 serde_yaml = "0.8.13"
