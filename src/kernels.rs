@@ -10,6 +10,7 @@ use log::{info, warn};
 use serde_derive::Deserialize;
 
 pub const URL_BASE: &'static str = "https://mirrors.kernel.org/pub/linux/kernel";
+
 const KERNELS: &'static str = include_str!("kernels.yaml");
 
 /// Get all kernel versions.

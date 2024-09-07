@@ -1,7 +1,11 @@
 //! Calculate code statistics for the linux kernel.
 #![deny(missing_docs)]
 
+mod git;
+mod kernels;
+
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -12,17 +16,20 @@ use std::str;
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::Parser;
-use kernelstats::git::Git;
-use kernelstats::kernels::{self, Kernels};
 use log::info;
 use serde_derive::{Deserialize, Serialize};
 
+const REMOTE_GIT: &str = "git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git";
+
 /// Call tokei on the given path and get statistics.
 fn tokei(dir: &Path) -> Result<HashMap<String, LanguageStats>> {
-    let out = process::Command::new("tokei")
-        .current_dir(dir)
-        .args(&["-o", "json"])
-        .output()?;
+    let mut command = process::Command::new("tokei");
+    command.current_dir(dir);
+    command.args(&["-o", "json"]);
+
+    git::log_command(&command)?;
+
+    let out = command.output()?;
 
     if !out.status.success() {
         let out = str::from_utf8(&out.stderr)?;
@@ -97,7 +104,7 @@ pub enum Kernel<'a> {
         /// The tag of the kernel.
         tag: String,
         /// The git handle for the kernel.
-        git: Git<'a>,
+        git: git::Git<'a>,
     },
 }
 
@@ -216,7 +223,7 @@ async fn main() -> Result<()> {
         })?;
     }
 
-    let Kernels { mut releases } = kernels::kernels()?;
+    let kernels::Kernels { mut releases } = kernels::kernels()?;
 
     if !args.all {
         releases = releases.into_iter().filter(|v| v.important).collect();
@@ -238,11 +245,37 @@ async fn main() -> Result<()> {
     }
 
     if let Some(kernel_git_dir) = kernel_git_dir {
+        let git = git::Git::new(&kernel_git_dir);
+
         if !kernel_git_dir.is_dir() {
-            return Err(anyhow!("missing kernel directory"));
+            fs::create_dir_all(&kernel_git_dir)
+                .with_context(|| anyhow!("constructing directory {}", kernel_git_dir.display()))?;
+            git.init(REMOTE_GIT)?;
         }
 
-        let git = Git::new(&kernel_git_dir);
+        let mut hashes = Vec::new();
+        let mut existing = HashSet::new();
+
+        for tag in git.tags()? {
+            existing.insert(tag);
+        }
+
+        for (hash, reference) in git.ls_remote(REMOTE_GIT)? {
+            let Some(version) = reference.strip_prefix("refs/tags/") else {
+                continue;
+            };
+
+            if version.ends_with("^{}") || version.contains("-") || existing.contains(version) {
+                continue;
+            }
+
+            hashes.push((hash, version.to_string(), reference));
+        }
+
+        if !hashes.is_empty() {
+            log::info!("fetching {} remotes", hashes.len());
+            git.fetch(hashes.iter().map(|(_, _, reference)| reference))?;
+        }
 
         for tag in git.tags()? {
             match tag.as_str() {

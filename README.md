@@ -25,7 +25,7 @@ destructive to any changes in that directory.
 Run kernelstats:
 
 ```
-RUST_LOG=info cargo run -- --kernel-git path/to/linux.git
+RUST_LOG=info cargo run --release -- --kernel-git ../kernel-git
 ```
 
 Start Jupyter Notebook:
