@@ -1,19 +1,21 @@
 //! Calculate code statistics for the linux kernel.
 #![deny(missing_docs)]
 
-use anyhow::{anyhow, Context as _, Result};
-use clap::{App, Arg};
-use kernelstats::git::Git;
-use kernelstats::kernels::{self, Kernels};
-use log::info;
-use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::ops;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str;
+
+use anyhow::{anyhow, Context as _, Result};
+use clap::Parser;
+use kernelstats::git::Git;
+use kernelstats::kernels::{self, Kernels};
+use log::info;
+use serde_derive::{Deserialize, Serialize};
 
 /// Call tokei on the given path and get statistics.
 fn tokei(dir: &Path) -> Result<HashMap<String, LanguageStats>> {
@@ -159,90 +161,47 @@ impl<'a> Kernel<'a> {
     }
 }
 
-fn app() -> App<'static, 'static> {
-    App::new("kernelstats")
-        .version("0.0.1")
-        .author("John-John Tedro <udoprog@tedro.se>")
-        .about("Calculates statistics across kernel releases.")
-        .arg(
-            Arg::with_name("verify")
-                .long("verify")
-                .help("Verify that all kernels are available."),
-        )
-        .arg(
-            Arg::with_name("all")
-                .long("all")
-                .help("Build all kernel versions, not just important."),
-        )
-        .arg(
-            Arg::with_name("cache")
-                .long("cache")
-                .value_name("DIR")
-                .help("Sets the path to the cache directory.")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("work")
-                .long("work")
-                .value_name("DIR")
-                .help("Sets the path to the work directory.")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("stats")
-                .long("stats")
-                .value_name("DIR")
-                .help("Directory to store statistics in.")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("parallelism")
-                .long("parallelism")
-                .short("p")
-                .value_name("<count>")
-                .help("How many downloads to perform in parallel.")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("kernel-git")
-                .long("kernel-git")
-                .value_name("DIR")
-                .help("Sets the path to a kernel git directory.")
-                .takes_value(true),
-        )
+#[derive(Parser, Debug)]
+#[command(
+    version,
+    about = "Calculates statistics across kernel releases.",
+    author = "John-John Tedro <udoprog@tedro.se>"
+)]
+struct Args {
+    /// Verify that all kernels are available.
+    #[arg(long)]
+    verify: bool,
+    /// Build all kernel versions, not just important.
+    #[arg(long)]
+    all: bool,
+    /// Sets the path to the cache directory.
+    #[arg(long)]
+    cache: Option<PathBuf>,
+    /// Sets the path to the work directory.
+    #[arg(long)]
+    work: Option<PathBuf>,
+    /// Directory to store statistics in.
+    #[arg(long)]
+    stats: Option<PathBuf>,
+    /// Sets the path to a kernel git directory.
+    #[arg(long)]
+    kernel_git: Option<PathBuf>,
+    /// How many downloads to perform in parallel.
+    #[arg(long, short = 'p')]
+    parallelism: Option<usize>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     pretty_env_logger::init();
 
-    let matches = app().get_matches();
+    let args = Args::parse();
 
-    let kernel_git_dir = matches.value_of("kernel-git").map(Path::new);
-    let verify = matches.is_present("verify");
-    let all = matches.is_present("all");
-
-    let cache_dir = matches
-        .value_of("cache")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("cache"));
-
-    let work_dir = matches
-        .value_of("work")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("work"));
-
-    let stats_dir = matches
-        .value_of("stats")
-        .map(Path::new)
-        .unwrap_or_else(|| Path::new("stats"));
-
-    let parallelism = match matches.value_of("parallelism") {
-        Some(p) => str::parse(p).map_err(|e| anyhow!("failed to parse parallelism: {}", e))?,
-        None => 2,
-    };
-
-    use std::io::Write;
+    let kernel_git_dir = args.kernel_git.as_deref();
+    let cache_dir = args.cache.as_deref().unwrap_or(Path::new("cache"));
+    let work_dir = args.work.as_deref().unwrap_or(Path::new("work"));
+    let stats_dir = args.stats.as_deref().unwrap_or(Path::new("stats"));
+    let parallelism = args.parallelism.unwrap_or(2).max(1);
 
     let mut a = env::args();
     a.next();
@@ -259,14 +218,15 @@ async fn main() -> Result<()> {
 
     let Kernels { mut releases } = kernels::kernels()?;
 
-    if !all {
+    if !args.all {
         releases = releases.into_iter().filter(|v| v.important).collect();
     }
 
     let mut queue = Vec::new();
 
     info!("downloading old kernels to: {}", cache_dir.display());
-    let cached = kernels::download_old_kernels(cache_dir, &releases, verify, parallelism).await?;
+    let cached =
+        kernels::download_old_kernels(cache_dir, &releases, args.verify, parallelism).await?;
 
     for kernel in &cached {
         queue.push(Kernel::Cached {
@@ -301,7 +261,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    if verify {
+    if args.verify {
         for q in queue {
             info!("verified: {:?}", q);
         }

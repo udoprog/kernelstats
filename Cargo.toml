@@ -6,16 +6,16 @@ license = "MIT/Apache-2.0"
 edition = "2018"
 
 [dependencies]
-tokio = {version = "1.18", features = ["full"]}
-serde = "1"
-serde_json = "1"
-serde_yaml = "0.8.13"
+anyhow = "1.0.87"
+clap = { version = "4.5.17", features = ["derive"] }
+flate2 = "1.0.33"
+log = "0.4.22"
+pretty_env_logger = "0.5.0"
+reqwest = "0.12.7"
+serde = "1.0.210"
 serde_derive = "1"
-reqwest = "0.10.8"
-flate2 = "1.0.18"
-tar = "0.4.36"
-clap = "2.33"
-log = "0.4"
-pretty_env_logger = "0.4"
-anyhow = "1.0.33"
-unicycle = "0.6.3"
+serde_json = "1.0.128"
+serde_yaml = "0.8.13"
+tar = "0.4.41"
+tokio = { version = "1.40.0", features = ["full"] }
+unicycle = "0.10.2"

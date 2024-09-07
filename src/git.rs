@@ -1,8 +1,9 @@
-use anyhow::{anyhow, Result};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process;
 use std::str;
+
+use anyhow::{anyhow, ensure, Context, Result};
 
 /// Interact with a git repository.
 #[derive(Debug, Clone, Copy)]
@@ -21,12 +22,9 @@ impl<'a> Git<'a> {
             .current_dir(&self.repo)
             .args(args)
             .status()
-            .map_err(|e| anyhow!("git: failed to call: {}", e))?;
+            .context("git: failed to call")?;
 
-        if !status.success() {
-            return Err(anyhow!("git call failed: {}", status).into());
-        }
-
+        ensure!(status.success(), "git call failed: {status}");
         Ok(())
     }
 
@@ -36,16 +34,15 @@ impl<'a> Git<'a> {
             .current_dir(&self.repo)
             .args(args)
             .output()
-            .map_err(|e| anyhow!("git: failed to call: {}", e))?;
+            .context("git: failed to call")?;
 
         if !out.status.success() {
-            let out = str::from_utf8(&out.stderr)
-                .map_err(|_| anyhow!("git stderr is not valid UTF-8"))?;
-            return Err(anyhow!("git error: {}", out).into());
+            let out = str::from_utf8(&out.stderr).context("git stderr is not valid utf-8")?;
+            return Err(anyhow!("git error: {out}").into());
         }
 
         let out =
-            str::from_utf8(&out.stdout).map_err(|_| anyhow!("git stdout is not valid UTF-8"))?;
+            str::from_utf8(&out.stdout).map_err(|_| anyhow!("git stdout is not valid utf-8"))?;
         Ok(out.to_string())
     }
 

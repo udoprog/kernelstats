@@ -1,19 +1,20 @@
 //! list of old kernel versions.
 
-use anyhow::{anyhow, Result};
-use log::{info, warn};
-use serde_derive::Deserialize;
 use std::fmt;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+
+use anyhow::{anyhow, Context, Result};
+use log::{info, warn};
+use serde_derive::Deserialize;
 
 pub const URL_BASE: &'static str = "https://mirrors.kernel.org/pub/linux/kernel";
 const KERNELS: &'static str = include_str!("kernels.yaml");
 
 /// Get all kernel versions.
 pub fn kernels() -> Result<Kernels> {
-    serde_yaml::from_str(KERNELS).map_err(|e| anyhow!("failed to deserialize kernels: {}", e))
+    serde_yaml::from_str(KERNELS).context("failed to deserialize kernels")
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -129,7 +130,7 @@ pub async fn download_old_kernels<'a>(
                     Err(e) => {
                         warn!("ignoring bad archive: {}: {}", path.display(), e);
                         fs::remove_file(&path)
-                            .map_err(|e| anyhow!("failed to remove: {}: {}", path.display(), e))?;
+                            .with_context(|| anyhow!("failed to remove: {}", path.display()))?;
                         false
                     }
                 }
@@ -155,7 +156,7 @@ pub async fn download_old_kernels<'a>(
 
         let res = reqwest::get(&url)
             .await
-            .map_err(|e| anyhow!("failed to get url: {}: {}", url, e))?;
+            .with_context(|| anyhow!("failed to get url: {url}"))?;
 
         if !res.status().is_success() {
             return Err(anyhow!("failed to download: {}: {}", url, res.status()).into());
@@ -172,12 +173,13 @@ pub async fn download_old_kernels<'a>(
         }
 
         let mut out = fs::File::create(&path)
-            .map_err(|e| anyhow!("failed to open file: {}: {}", path.display(), e))?;
+            .with_context(|| anyhow!("failed to open file: {}", path.display()))?;
 
         out.write_all(&buf)
-            .map_err(|e| anyhow!("failed to write file: {}: {}", path.display(), e))?;
+            .with_context(|| anyhow!("failed to write file: {}", path.display()))?;
+
         out.sync_all()
-            .map_err(|e| anyhow!("failed to sync: {}: {}", path.display(), e))?;
+            .with_context(|| anyhow!("failed to sync: {}", path.display()))?;
 
         Ok(CachedKernel { version, path })
     }
